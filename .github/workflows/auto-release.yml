@@ -1,0 +1,43 @@
+name: Auto-Release
+
+on:
+  workflow_call:
+    inputs:
+      generate-tag:
+        description: 'if true a new patch tag will be created by adding 1 to the last patch version'
+        required: true
+        type: boolean
+        default: true
+      custom-tag:
+        description: 'this tag will be used instead auto-generating one if create-new-tag is false'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Find Next Patch SemVer Number
+      if: ${{ inputs.generate-tag }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        git fetch --tags
+        LATEST_TAG=$(gh api repos/:owner/:repo/releases/latest --jq '.tag_name')
+        VERSION_NEXT="$(echo "$LATEST_TAG" | awk -F. '{$NF++; print $1"."$2"."$NF}')"
+        echo "VERSION_NEXT=$VERSION_NEXT" >> $GITHUB_ENV
+        echo "GENERATED_TAG=$VERSION_NEXT" >> $GITHUB_OUTPUT
+    - name: Use Custom Tag
+      if: ${{ !inputs.generate-tag }}
+      run: |
+        echo "VERSION_NEXT=${{ inputs.custom-tag }}" >> $GITHUB_ENV
+    - name: Create Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create $VERSION_NEXT --generate-notes

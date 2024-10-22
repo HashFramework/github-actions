@@ -1,0 +1,114 @@
+name: Solidity Deployment
+
+on:
+  workflow_call:
+    inputs:
+      network:
+        description: 'The evm network to deploy to'
+        required: true
+        type: string
+        default: 'holesky'
+      chain-id: 
+          description: 'Chain ID of the network'
+          required: true
+          type: string
+          default: '17000'  
+      deployer-address:
+          description: 'Address of the deployer'
+          required: true
+          type: string
+      etherscan-url:
+          description: 'The base URL for etherscan for the network'
+          required: true
+          type: string
+          default: 'https://holesky.etherscan.io'
+      environment:
+        description: 'Github Environment to deploy from; contains required secrets'
+        required: true
+        type: string
+      forge-deployment-contract:
+        description: 'Name of the contract containing the deploy script'
+        required: true
+        type: string
+      forge-deployment-signature:
+        description: 'Signature of the deploy script function to call'
+        required: true
+        type: string
+        default: 'deploy()'
+      forge-deployment-script-file:
+        description: 'Name of the deployment script file'
+        required: true
+        type: string
+      forge-deployment-params:
+        description: 'Parameters for the deployment script'
+        required: false
+        type: string
+    secrets:
+      aws-deployer-role:
+        description: 'AWS Role to assume'
+        required: true
+      kms-key-id:
+        description: 'KMS key ID for AWS'
+        required: true
+      rpc-url:
+        description: 'RPC URL for the network'
+        required: true
+      etherscan-api-key:
+        description: 'Etherscan API key'
+        required: true
+     
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws-deployer-role }}
+          aws-region: us-east-1
+      - name: Deploy Smart Contract
+        env:
+          AWS_KMS_KEY_ID: ${{ secrets.kms-key-id }}
+        run: | 
+          forge script ${{ inputs.forge-deployment-contract }} \
+            --sig "${{inputs.forge-deployment-signature}}" \
+            --rpc-url ${{ secrets.rpc-url }} \
+            --etherscan-api-key ${{ secrets.etherscan-api-key }} \
+            --aws \
+            --broadcast \
+            --legacy \
+            --verify \
+            --retries 20 \
+            --chain ${{ inputs.network }} \
+            --sender ${{ inputs.deployer-address}} \
+            --delay 5 \
+            ${{ inputs.forge-deployment-params }}
+      - name: Upload Transaction Json
+        uses: actions/upload-artifact@v4
+        with:
+          name: transaction-json
+          path: broadcast/${{ inputs.forge-deployment-script-file }}/${{ inputs.chain-id }}/run-latest.json
+      - name: Update Release Notes
+        env: 
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SIG_NAME=$(echo "${{ inputs.forge-deployment-signature }}" | cut -d '(' -f 1)
+          LATEST_TAG=$(gh api repos/:owner/:repo/releases/latest --jq '.tag_name')
+          gh release view $LATEST_TAG --json body -q .body >> releaseNotes.md 
+          echo "# Deployment Information:" >> releaseNotes.md
+          echo "## ${{ inputs.network }}" >> releaseNotes.md
+          (cat broadcast/${{ inputs.forge-deployment-script-file }}/${{ inputs.chain-id }}/${SIG_NAME}-latest.json | jq '.transactions[] | select(.transactionType == ("CREATE", "CREATE2")) | "- [\(.contractName)](${{inputs.etherscan-url}}/address/\(.contractAddress)#code): \(.contractAddress)"' | tr -d '"' >> releaseNotes.md)
+          (cat broadcast/${{ inputs.forge-deployment-script-file }}/${{ inputs.chain-id }}/${SIG_NAME}-latest.json | jq '.transactions[].additionalContracts[] | "- [\(.address)](${{inputs.etherscan-url}}/address/\(.address)#code)"' | tr -d '"' >> releaseNotes.md)
+
+          gh release edit $LATEST_TAG --notes-file releaseNotes.md
